@@ -1,0 +1,30 @@
+{
+  "manifest_version": 1,
+  "name": "网址摘要插件",
+  "version": "1.2.0",
+  "description": "自动检测消息中的网址并发送内容摘要",
+  "author": {
+    "name": "晴空"
+  },
+  "license": "MIT",
+  "host_application": {
+    "min_version": "0.8.0",
+    "max_version": "0.8.0"
+  },
+  "homepage_url": "https://github.com/XXXxx7258/url_summary_plugin",
+  "repository_url": "https://github.com/XXXxx7258/url_summary_plugin",
+  "keywords": ["网址", "摘要", "内容提取", "网页分析", "AI摘要"],
+  "categories": ["工具", "网络", "AI功能"],
+  "default_locale": "zh-CN",
+  "plugin_info": {
+    "is_built_in": false,
+    "plugin_type": "general",
+    "components": [
+      {
+        "type": "action",
+        "name": "url_summary",
+        "description": "检测并总结网页内容"
+      }
+    ]
+  }
+}

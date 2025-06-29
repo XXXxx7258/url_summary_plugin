@@ -1,0 +1,58 @@
+# url_summary_plugin - 自动生成的配置文件
+# 自动检测消息中的网址并发送内容摘要
+
+# 通用设置
+[general]
+
+# 是否启用插件
+enabled = true
+
+# 是否在群聊启用
+enable_group = true
+
+# 是否在私聊启用
+enable_private = true
+
+
+# HTTP请求设置
+[http]
+
+# 请求超时时间(秒)
+timeout = 10
+
+# HTTP请求使用的User-Agent
+user_agent = "Mozilla/5.0 (compatible; MaiBot-URL-Summary/1.0)"
+
+# 最大重试次数
+max_retries = 3
+
+
+# 内容处理设置
+[processing]
+
+# 摘要最大长度
+max_length = 400
+
+# 是否包含标题
+include_title = true
+
+# 最小内容长度
+min_content_length = 100
+
+# 相关页面最多抓取数量
+max_subpage = 2
+
+# 相关页面摘要最大长度
+subpage_length = 200
+
+# 是否抓取站内相关页面摘要
+enable_related_pages = true
+
+
+# 缓存设置
+[cache]
+
+# 防重复缓存时间(秒)
+cache_ttl = 600
+
+
