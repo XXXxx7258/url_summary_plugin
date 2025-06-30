@@ -25,7 +25,6 @@ except ImportError:
 recent_messages = OrderedDict()
 
 def get_cache_ttl():
-    # 动态读取缓存时间（秒），无配置则用600
     try:
         plugin_inst = UrlSummaryPlugin.plugin_instance
         if plugin_inst:
@@ -40,14 +39,12 @@ def is_duplicate_message(msg):
     now = time.time()
     cache_ttl = get_cache_ttl()
     key = None
-    # 优先用消息ID，如无则用内容hash
     if hasattr(msg, "id") and msg.id:
         key = f"id:{msg.id}"
     elif hasattr(msg, "plain_text") and msg.plain_text:
         key = f"hash:{hash(msg.plain_text)}"
     else:
         key = f"hash:{hash(str(msg))}"
-    # 清理过期
     keys_to_del = [k for k, v in recent_messages.items() if now - v > cache_ttl]
     for k in keys_to_del:
         recent_messages.pop(k, None)
@@ -60,7 +57,6 @@ def is_duplicate_message(msg):
 
 class UrlSummaryAction(BaseAction):
     """网址摘要Action - 智能检测并总结网页内容，并对主站内重要链接做二级摘要"""
-    # === 激活控制 ===
     action_name = "url_summary"
     action_description = "检测消息中的真实网址并发送内容摘要"
     focus_activation_type = ActionActivationType.KEYWORD
@@ -70,25 +66,22 @@ class UrlSummaryAction(BaseAction):
     mode_enable = ChatMode.ALL
     parallel_action = False
 
-    # === 功能定义 ===
     action_parameters = {"url": "要处理的网页URL"}
     action_require = [
-        "当消息包含真实有效的网址时使用",
-        "需要提取网页主要内容时使用",
-        "用户分享真实链接时提供摘要"
+        "用户消息包含有效HTTP/HTTPS链接时使用",
+        "链接长度大于7字符且包含域名时使用"
     ]
+    llm_judge_prompt = "是否需要生成网页摘要？条件是消息包含URL且未重复。"
     associated_types = ["text"]
 
-    # 配置默认值
     DEFAULT_TIMEOUT = 10
-    DEFAULT_MAX_LENGTH = 400  # 建议400字符，约200汉字
-    MIN_URL_LENGTH = 7  # 更宽松：原来是10，放宽为7
-    DEFAULT_MAX_SUBPAGE = 2      # 最多抓取2个内链摘要
-    DEFAULT_SUBPAGE_LENGTH = 200 # 子页面摘要最大长度
+    DEFAULT_MAX_LENGTH = 400
+    MIN_URL_LENGTH = 7
+    DEFAULT_MAX_SUBPAGE = 2
+    DEFAULT_SUBPAGE_LENGTH = 200
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # 更宽松的正则：允许没有协议，仅需包含点和两段
         self.url_validator = re.compile(
             r'^(?:(?:https?|ftp):\/\/)?'
             r'(?:\S+(?::\S*)?@)?'
@@ -100,12 +93,10 @@ class UrlSummaryAction(BaseAction):
         )
 
     async def execute(self) -> Tuple[bool, str]:
-        # --------- 去重判断 ---------
         if hasattr(self, 'message'):
             if is_duplicate_message(self.message):
                 logger.info("检测到重复消息，跳过处理")
                 return False, "已忽略重复消息"
-        # --------- 业务逻辑 ---------
         try:
             logger.debug(f"UrlSummaryAction 收到 action_data: {getattr(self, 'action_data', {})}")
             logger.debug(f"消息对象存在: {hasattr(self, 'message')}")
@@ -173,7 +164,7 @@ class UrlSummaryAction(BaseAction):
 
     async def send_summary(self, url: str, summary: str):
         display_url = url if len(url) <= 50 else f"{url[:30]}...{url[-20:]}"
-        summary_msg = f"🔗🔗 网页摘要 [{display_url}]:\n{summary}"
+        summary_msg = self.format_summary_message(display_url, summary)
         await self.send_text(summary_msg)
         try:
             emoji_result = await emoji_api.get_by_emotion("success")
@@ -182,6 +173,27 @@ class UrlSummaryAction(BaseAction):
                 await send_api.emoji_to_user(emoji_base64, self.user_id)
         except Exception as e:
             logger.warning(f"发送成功表情失败: {str(e)}")
+
+    def format_summary_message(self, display_url: str, summary: str) -> str:
+        """
+        用 markdown 更美观地展示摘要，主内容和相关页面分开。
+        """
+        parts = summary.split('\n\n相关页面：', 1)
+        main = parts[0].strip()
+        related = parts[1].strip() if len(parts) == 2 else None
+        msg = f"🔗 **网页摘要** [`{display_url}`]\n\n> {main.replace(chr(10), '\n> ')}"
+        if related:
+            msg += "\n\n<details><summary>相关页面</summary>\n\n"
+            # 每条相关页面用 markdown blockquote 展示
+            for sub in re.split(r"\n【(https?://[^】]+)】\n", "\n"+related):
+                if not sub.strip():
+                    continue
+                if sub.startswith("http"):
+                    # 下一行是内容，上一轮已经处理
+                    continue
+                msg += f"> {sub.strip().replace(chr(10), '\\n> ')}\n"
+            msg += "</details>"
+        return msg
 
     async def send_timeout_message(self):
         try:
@@ -241,7 +253,11 @@ class UrlSummaryAction(BaseAction):
     ) -> Optional[str]:
         if not url.startswith(("http://", "https://")):
             return f"⚠️ 无效的URL格式: {url}"
-        headers = {"User-Agent": user_agent}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9"
+        }
         if seen_links is None:
             seen_links = set()
         for attempt in range(3):
@@ -349,23 +365,8 @@ class UrlSummaryAction(BaseAction):
                 break
         return links
 
-    def extract_summary_from_soup(self, soup: BeautifulSoup, html: str, max_length: int) -> str:
-        meta_desc = soup.find("meta", attrs={"name": "description"}) or \
-            soup.find("meta", attrs={"property": "og:description"})
-        og_title = soup.find("meta", attrs={"property": "og:title"})
-        og_site = soup.find("meta", attrs={"property": "og:site_name"})
-        title = og_title.get("content", "").strip() if og_title else (soup.title.get_text(strip=True) if soup.title else "")
-        site = og_site.get("content", "").strip() if og_site else ""
-        desc = meta_desc.get("content", "").strip() if meta_desc else ""
-        content = self.extract_main_content(soup, html=html)
-        summary = desc if desc else self.summarize_text(content, max_length)
-        lines = []
-        if title: lines.append(f"[{title}]")
-        if site: lines.append(f"（{site}）")
-        lines.append(summary)
-        return "\n".join(lines).strip()
-
     def extract_main_content(self, soup: BeautifulSoup, html: str = None) -> str:
+        # 1. 优先用 readability
         if readability_available and html is not None:
             try:
                 doc = Document(html)
@@ -373,34 +374,60 @@ class UrlSummaryAction(BaseAction):
                 soup2 = BeautifulSoup(content, 'html.parser')
                 text = soup2.get_text(" ", strip=True)
                 if len(text) > 50:
+                    logger.debug(f"readability正文长度: {len(text)}")
                     return text
             except Exception as e:
                 logger.warning(f"readability抽取正文失败: {str(e)}")
-        for tag in ['article', 'main', 'content', 'entry-content']:
+        # 2. 常见标签
+        for tag in ['article', 'main', 'content', 'entry-content', 'body', 'section']:
             element = soup.find(tag)
             if element:
-                return element.get_text(" ", strip=True)
-        for class_name in ['content', 'article', 'post-content', 'main-content', 'body']:
+                text = element.get_text(" ", strip=True)
+                logger.debug(f"标签<{tag}>正文长度: {len(text)}")
+                if len(text) > 50:
+                    return text
+        # 3. 常见 class
+        for class_name in [
+            'wp_articlecontent', 'article-content', 'articleBody', 'article', 'main', 'content', 'entry-content',
+            'body', 'post', 'post-content', 'main-content', 'TRS_Editor',
+            'news-content', 'content-main', 'articleText', 'contentArea'
+        ]:
             element = soup.find(class_=class_name)
             if element:
-                return element.get_text(" ", strip=True)
+                text = element.get_text(" ", strip=True)
+                logger.debug(f"class={class_name} 正文长度: {len(text)}")
+                if len(text) > 50:
+                    return text
+        # 4. 放宽<p>长度限制
         paragraphs = []
         for p in soup.find_all('p'):
             text = p.get_text(" ", strip=True)
-            if 30 < len(text) < 1500:
+            if len(text) > 10:
                 paragraphs.append(text)
-        if not paragraphs:
-            a_tags = soup.find_all('a', href=True)
-            headlines = []
-            for a in a_tags:
-                txt = a.get_text(strip=True)
-                if txt and 5 < len(txt) < 40 and not re.search(r"[《》]", txt):
-                    headlines.append(txt)
-                if len(headlines) >= 5:
-                    break
-            if headlines:
-                return " / ".join(headlines)
-        return " ".join(paragraphs[:15])
+        if paragraphs:
+            logger.debug(f"抓到段落数: {len(paragraphs)}，合并前3段落为：{' | '.join(paragraphs[:3])}")
+            return " ".join(paragraphs[:20])
+        # 5. 整个<body>
+        body = soup.body
+        if body:
+            text = body.get_text(" ", strip=True)
+            logger.debug(f"<body>长度: {len(text)}")
+            if len(text) > 50:
+                return text
+        # 6. headlines fallback
+        a_tags = soup.find_all('a', href=True)
+        headlines = []
+        for a in a_tags:
+            txt = a.get_text(strip=True)
+            if txt and 5 < len(txt) < 40 and not re.search(r"[《》]", txt):
+                headlines.append(txt)
+            if len(headlines) >= 5:
+                break
+        if headlines:
+            logger.debug(f"headlines fallback: {' / '.join(headlines)}")
+            return " / ".join(headlines)
+        logger.debug("正文提取全部失败，返回空字符串")
+        return ""
 
     def extract_main_content_html(self, html: str) -> Optional[str]:
         if readability_available and html is not None:
@@ -410,35 +437,201 @@ class UrlSummaryAction(BaseAction):
             except Exception as e:
                 logger.warning(f"readability正文html抽取失败: {str(e)}")
         return None
-
-    def summarize_text(self, text: str, max_length: int=400) -> str:
+    def summarize_text(self, text: str, max_length: int = 400) -> str:
+        """
+        支持三种摘要模式：llm（调用LLM智能摘要）、sentence（按句）、plain（硬截断）。
+        摘要模式通过 processing.summary_mode 配置（llm/sentence/plain），默认 sentence。
+        """
         import re
         text = re.sub(r'([a-zA-Z0-9])。([a-zA-Z0-9])', r'\1.\2', text)
-        sentences = re.split(r'([。.!！?\n])', text)
-        summary = ""
-        for i in range(0, len(sentences), 2):
-            s = sentences[i].strip()
-            if not s:
-                continue
-            end = sentences[i+1] if i+1 < len(sentences) else ""
-            if re.match(r'^https?://', s) or re.match(r'^www\.', s) or ('.' in s and ' ' not in s and not re.search(r'[\u4e00-\u9fa5]', s)):
-                summary += s
-            else:
-                summary += s + (end if end else "。")
-            if len(summary) > max_length:
-                summary = summary[:max_length]
-                break
-        return summary[:max_length] + ("..." if len(summary) > max_length else "")
-
-    def truncate_text(self, text: str, max_length: int) -> str:
+        text = text.strip()
+        if not text:
+            return ""
         if len(text) <= max_length:
             return text
-        trunc_point = max_length
-        for i in range(max_length, max(0, max_length-100), -1):
-            if text[i] in ('.', '。', '!', '！', '?', '？', '\n'):
-                trunc_point = i + 1
+
+        summary_mode = "sentence"
+        try:
+            summary_mode = self.get_config("processing.summary_mode", "sentence")
+        except Exception:
+            pass
+
+        if summary_mode == "llm":
+            # 注意：此方法变为同步包装，实际 LLM 摘要走异步流程，见 extract_summary_from_soup
+            return "[LLM摘要处理中...]"
+
+        if summary_mode == "plain":
+            trunc_point = -1
+            for sep in ['。', '！', '!', '？', '?', '.', '\n']:
+                idx = text.rfind(sep, 0, max_length)
+                if idx > trunc_point:
+                    trunc_point = idx
+            if trunc_point != -1 and trunc_point > max_length // 3:
+                return text[:trunc_point + 1] + "..."
+            return text[:max_length] + "..."
+
+        # 默认 sentence 模式
+        sentences = re.split(r'([。！？!?\.])', text)
+        result = ''
+        total = 0
+        for i in range(0, len(sentences) - 1, 2):
+            seg = sentences[i] + sentences[i + 1]
+            if total + len(seg) > max_length:
                 break
-        return text[:trunc_point] + "..."
+            result += seg
+            total += len(seg)
+        if not result:
+            return text[:max_length] + "..."
+        return result.strip() + "..."
+
+    async def summarize_by_llm(self, text, max_length: int) -> str:
+        try:
+            from src.plugin_system.apis import llm_api
+            logger.info(f"[LLM摘要调用] prompt前100字: {text[:100]}")
+
+            # 获取 ModelConfig 实例
+            model_config_obj = llm_api.get_available_models()
+            logger.info(f"models获取结果: {model_config_obj}, 类型: {type(model_config_obj)}")
+
+            # === 新增：从配置读取模型名 ===
+            model_config_key = self.get_config("processing.llm_config_key", "utils_small")
+            model_config = getattr(model_config_obj, model_config_key, None)
+            if not model_config:
+                logger.warning(f"未找到指定模型 {model_config_key}，尝试 fallback")
+                model_config = getattr(model_config_obj, "replyer_1", None)
+            if not model_config:
+                logger.error("未获取到任何可用模型配置，降级本地摘要")
+                return self.summarize_text(text, max_length)
+
+            prompt = f"请将以下内容压缩为不超过{max_length}字的中文摘要：\n{text}"
+            success, response, reasoning, model_used = await llm_api.generate_with_model(prompt, model_config)
+            logger.info(f"[LLM摘要调用] model={model_used}, success={success}, response前100字={response[:100] if response else response}")
+            if success and response:
+                return response.strip()
+            else:
+                logger.error("[LLM摘要调用] LLM未返回结果，回退本地摘要")
+                return self.summarize_text(text, max_length)
+        except Exception as e:
+            logger.exception(f"[LLM摘要调用] 失败: {e}")
+            return self.summarize_text(text, max_length)       
+    def extract_summary_from_soup(self, soup: BeautifulSoup, html: str, max_length: int) -> str:
+        meta_desc = soup.find("meta", attrs={"name": "description"}) or \
+            soup.find("meta", attrs={"property": "og:description"})
+        og_title = soup.find("meta", attrs={"property": "og:title"})
+        og_site = soup.find("meta", attrs={"property": "og:site_name"})
+        title = og_title.get("content", "").strip() if og_title else (soup.title.get_text(strip=True) if soup.title else "")
+        site = og_site.get("content", "").strip() if og_site else ""
+        desc = meta_desc.get("content", "").strip() if meta_desc else ""
+        content = self.extract_main_content(soup, html=html)
+        # 新增：支持异步 LLM 智能摘要。标记需要异步处理。
+        summary_mode = "sentence"
+        try:
+            summary_mode = self.get_config("processing.summary_mode", "sentence")
+            logger.info(f"[摘要流程] summary_mode={summary_mode}")
+        except Exception:
+            pass
+        logger.info(f"[摘要流程] summary_mode={summary_mode}, content前50字: {content[:50]}")
+        if summary_mode == "llm" and content:
+            # 在 get_url_summary 里判定/触发异步摘要
+            summary = "[[LLM摘要处理中]]"
+        else:
+            summary = desc if desc else self.summarize_text(content, max_length)
+
+        lines = []
+        if title: lines.append(f"**{title}**")
+        if site: lines.append(f"（{site}）")
+        lines.append(summary)
+        return "\n".join(lines).strip()
+
+    async def get_url_summary(
+        self,
+        url: str,
+        timeout: int,
+        max_length: int,
+        user_agent: str,
+        fetch_links: bool = True,
+        seen_links: Optional[Set[str]] = None,
+        max_subpage: int = 2,
+        subpage_length: int = 200
+    ) -> Optional[str]:
+        if not url.startswith(("http://", "https://")):
+            return f"⚠️ 无效的URL格式: {url}"
+        headers = {"User-Agent": user_agent}
+        if seen_links is None:
+            seen_links = set()
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    logger.debug(f"尝试获取URL内容: {url} (尝试 {attempt+1}/3)")
+                    async with session.get(
+                        url,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=timeout),
+                        ssl=False
+                    ) as response:
+                        if response.status != 200:
+                            return f"⚠️ 无法访问网页 (状态码: {response.status})"
+                        raw = await response.read()
+                        encoding = response.charset
+                        if not encoding:
+                            try:
+                                import chardet
+                                encoding = chardet.detect(raw)['encoding']
+                            except Exception:
+                                encoding = 'utf-8'
+                        try:
+                            html = raw.decode(encoding or 'utf-8', errors='ignore')
+                        except Exception:
+                            html = raw.decode('utf-8', errors='ignore')
+                        logger.debug(f"抓取到的HTML片段: {html[:500]}")
+
+                        soup_for_links = BeautifulSoup(html, 'html.parser')
+                        soup = BeautifulSoup(html, 'html.parser')
+                        # 判断是否需要 LLM 智能摘要
+                        summary_mode = self.get_config("processing.summary_mode", "sentence")
+                        content = self.extract_main_content(soup, html=html)
+                        if summary_mode == "llm" and content:
+                            summary = await self.summarize_by_llm(content, max_length)
+                            meta_desc = soup.find("meta", attrs={"name": "description"}) or \
+                                soup.find("meta", attrs={"property": "og:description"})
+                            og_title = soup.find("meta", attrs={"property": "og:title"})
+                            og_site = soup.find("meta", attrs={"property": "og:site_name"})
+                            title = og_title.get("content", "").strip() if og_title else (soup.title.get_text(strip=True) if soup.title else "")
+                            site = og_site.get("content", "").strip() if og_site else ""
+                            desc = meta_desc.get("content", "").strip() if meta_desc else ""
+                            lines = []
+                            if title: lines.append(f"**{title}**")
+                            if site: lines.append(f"（{site}）")
+                            lines.append(summary)
+                            summary = "\n".join(lines).strip()
+                        else:
+                            summary = self.extract_summary_from_soup(soup, html, max_length)
+                        # 相关页面逻辑不变
+                        if fetch_links:
+                            internal_links = self.extract_internal_links(
+                                soup_for_links, url, max_links=max_subpage, seen_links=seen_links
+                            )
+                            if internal_links:
+                                for link in internal_links:
+                                    seen_links.add(link)
+                                related = await self.get_multi_url_summaries(
+                                    internal_links, timeout, subpage_length, user_agent, seen_links=seen_links
+                                )
+                                if related:
+                                    summary += "\n\n相关页面："
+                                    for link, sub_summary in related:
+                                        link_disp = link if len(link) <= 50 else f"{link[:30]}...{link[-20:]}"
+                                        summary += f"\n【{link_disp}】\n{sub_summary}"
+                        return summary
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.warning(f"请求失败 (尝试 {attempt+1}/3): {type(e).__name__}")
+                if attempt == 2:
+                    return f"❌❌ 请求失败: {type(e).__name__}"
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.exception("处理错误")
+                return f"❌❌ 处理错误: {type(e).__name__}"
+        return "❌❌ 多次尝试后仍无法获取内容"
 
 @register_plugin
 class UrlSummaryPlugin(BasePlugin):
@@ -455,34 +648,45 @@ class UrlSummaryPlugin(BasePlugin):
         "cache": "缓存设置"
     }
     config_schema = {
-        "general": {
-            "enabled": ConfigField(type=bool, default=True, description="是否启用插件"),
-            "enable_group": ConfigField(type=bool, default=True, description="是否在群聊启用"),
-            "enable_private": ConfigField(type=bool, default=True, description="是否在私聊启用")
-        },
-        "http": {
-            "timeout": ConfigField(type=int, default=10, description="请求超时时间(秒)"),
-            "user_agent": ConfigField(
-                type=str,
-                default="Mozilla/5.0 (compatible; MaiBot-URL-Summary/1.0)",
-                description="HTTP请求使用的User-Agent"
-            ),
-            "max_retries": ConfigField(type=int, default=3, description="最大重试次数")
-        },
-        "processing": {
-            "max_length": ConfigField(type=int, default=400, description="摘要最大长度"),
-            "include_title": ConfigField(type=bool, default=True, description="是否包含标题"),
-            "min_content_length": ConfigField(type=int, default=100, description="最小内容长度"),
-            "max_subpage": ConfigField(type=int, default=2, description="相关页面最多抓取数量"),
-            "subpage_length": ConfigField(type=int, default=200, description="相关页面摘要最大长度"),
-            "enable_related_pages": ConfigField(type=bool, default=True, description="是否抓取站内相关页面摘要")
-        },
-        "cache": {
-            "cache_ttl": ConfigField(type=int, default=600, description="防重复缓存时间(秒)")
+            "config_version": ConfigField(type=str, default="1.0.0", description="配置版本"),
+            "general": {
+                "enabled": ConfigField(type=bool, default=True, description="是否启用插件"),
+                "enable_group": ConfigField(type=bool, default=True, description="是否在群聊启用"),
+                "enable_private": ConfigField(type=bool, default=True, description="是否在私聊启用")
+            },
+            "http": {
+                "timeout": ConfigField(type=int, default=10, description="请求超时时间(秒)"),
+                "user_agent": ConfigField(
+                    type=str,
+                    default="Mozilla/5.0 (compatible; MaiBot-URL-Summary/1.0)",
+                    description="HTTP请求使用的User-Agent"
+                ),
+                "max_retries": ConfigField(type=int, default=3, description="最大重试次数")
+            },
+            "processing": {
+                "max_length": ConfigField(type=int, default=400, description="摘要最大长度"),
+                "include_title": ConfigField(type=bool, default=True, description="是否包含标题"),
+                "min_content_length": ConfigField(type=int, default=100, description="最小内容长度"),
+                "max_subpage": ConfigField(type=int, default=2, description="相关页面最多抓取数量"),
+                "subpage_length": ConfigField(type=int, default=200, description="相关页面摘要最大长度"),
+                "enable_related_pages": ConfigField(type=bool, default=True, description="是否抓取站内相关页面摘要"),
+                "summary_mode": ConfigField(
+                    type=str,
+                    default="sentence",
+                    description="摘要生成方式，可选 llm（智能摘要）、sentence（按句截断）、plain（原样截断）"
+                ),
+                # === 新增配置项：LLM模型选择 ===
+                "llm_config_key": ConfigField(
+                    type=str,
+                    default="utils_small",
+                    description="LLM摘要时采用的模型配置key，例如：utils_small, replyer_1, replyer_2"
+                )
+            },
+            "cache": {
+                "cache_ttl": ConfigField(type=int, default=600, description="防重复缓存时间(秒)")
+            }
         }
-    }
-
-    plugin_instance = None  # for global config reading
+    plugin_instance = None
 
     def __init__(self, *args, **kwargs):
         UrlSummaryPlugin.plugin_instance = self

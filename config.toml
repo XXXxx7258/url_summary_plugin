@@ -1,6 +1,9 @@
 # url_summary_plugin - 自动生成的配置文件
 # 自动检测消息中的网址并发送内容摘要
 
+[config_version]
+
+
 # 通用设置
 [general]
 
@@ -47,6 +50,12 @@ subpage_length = 200
 
 # 是否抓取站内相关页面摘要
 enable_related_pages = true
+
+# 摘要生成方式，可选 llm（智能摘要）、sentence（按句截断）、plain（原样截断）
+summary_mode = "llm"
+
+# LLM摘要时采用的模型配置key，例如：utils_small, replyer_1, replyer_2
+llm_config_key = "replyer_1"
 
 
 # 缓存设置
