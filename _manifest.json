@@ -4,7 +4,8 @@
   "version": "1.2.0",
   "description": "自动检测消息中的网址并发送内容摘要",
   "author": {
-    "name": "晴空"
+    "name": "晴空",
+    "url":"https://github.com/XXXxx7258"
   },
   "license": "MIT",
   "host_application": {
