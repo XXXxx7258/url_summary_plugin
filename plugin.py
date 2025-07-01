@@ -184,12 +184,10 @@ class UrlSummaryAction(BaseAction):
         msg = f"🔗 **网页摘要** [`{display_url}`]\n\n> {main.replace(chr(10), '\n> ')}"
         if related:
             msg += "\n\n<details><summary>相关页面</summary>\n\n"
-            # 每条相关页面用 markdown blockquote 展示
             for sub in re.split(r"\n【(https?://[^】]+)】\n", "\n"+related):
                 if not sub.strip():
                     continue
                 if sub.startswith("http"):
-                    # 下一行是内容，上一轮已经处理
                     continue
                 msg += f"> {sub.strip().replace(chr(10), '\\n> ')}\n"
             msg += "</details>"
@@ -251,24 +249,28 @@ class UrlSummaryAction(BaseAction):
         max_subpage: int = 2,
         subpage_length: int = 200
     ) -> Optional[str]:
+        """最佳实践：支持 HTTP 头、Clash 代理、LLM 智能摘要、抓取相关页面。"""
         if not url.startswith(("http://", "https://")):
             return f"⚠️ 无效的URL格式: {url}"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "User-Agent": user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9"
         }
+        proxy_url = self.get_config("http.proxy", "")
         if seen_links is None:
             seen_links = set()
+
         for attempt in range(3):
             try:
                 async with aiohttp.ClientSession() as session:
-                    logger.debug(f"尝试获取URL内容: {url} (尝试 {attempt+1}/3)")
+                    logger.debug(f"尝试获取URL内容: {url} (尝试 {attempt+1}/3), 代理: {proxy_url}")
                     async with session.get(
                         url,
                         headers=headers,
                         timeout=aiohttp.ClientTimeout(total=timeout),
-                        ssl=False
+                        ssl=False,
+                        proxy=proxy_url if proxy_url else None
                     ) as response:
                         if response.status != 200:
                             return f"⚠️ 无法访问网页 (状态码: {response.status})"
@@ -287,7 +289,26 @@ class UrlSummaryAction(BaseAction):
 
                         soup_for_links = BeautifulSoup(html, 'html.parser')
                         soup = BeautifulSoup(html, 'html.parser')
-                        summary = self.extract_summary_from_soup(soup, html, max_length)
+                        # 智能摘要逻辑，可扩展更多 summary_mode
+                        summary_mode = self.get_config("processing.summary_mode", "sentence")
+                        content = self.extract_main_content(soup, html=html)
+                        if summary_mode == "llm" and content:
+                            summary = await self.summarize_by_llm(content, max_length)
+                            meta_desc = soup.find("meta", attrs={"name": "description"}) or \
+                                soup.find("meta", attrs={"property": "og:description"})
+                            og_title = soup.find("meta", attrs={"property": "og:title"})
+                            og_site = soup.find("meta", attrs={"property": "og:site_name"})
+                            title = og_title.get("content", "").strip() if og_title else (soup.title.get_text(strip=True) if soup.title else "")
+                            site = og_site.get("content", "").strip() if og_site else ""
+                            desc = meta_desc.get("content", "").strip() if meta_desc else ""
+                            lines = []
+                            if title: lines.append(f"**{title}**")
+                            if site: lines.append(f"（{site}）")
+                            lines.append(summary)
+                            summary = "\n".join(lines).strip()
+                        else:
+                            summary = self.extract_summary_from_soup(soup, html, max_length)
+                        # 相关页面逻辑
                         if fetch_links:
                             internal_links = self.extract_internal_links(
                                 soup_for_links, url, max_links=max_subpage, seen_links=seen_links
@@ -353,11 +374,7 @@ class UrlSummaryAction(BaseAction):
                 and abs_url != base_url
                 and not abs_url.startswith('javascript:')
                 and not abs_url.startswith('mailto:')
-                and not abs_url.endswith('.jpg')
-                and not abs_url.endswith('.png')
-                and not abs_url.endswith('.gif')
-                and not abs_url.endswith('.svg')
-                and not abs_url.endswith('.ico')
+                and not abs_url.endswith(('.jpg', '.png', '.gif', '.svg', '.ico'))
             ):
                 seen.add(abs_url)
                 links.append(abs_url)
@@ -437,6 +454,7 @@ class UrlSummaryAction(BaseAction):
             except Exception as e:
                 logger.warning(f"readability正文html抽取失败: {str(e)}")
         return None
+
     def summarize_text(self, text: str, max_length: int = 400) -> str:
         """
         支持三种摘要模式：llm（调用LLM智能摘要）、sentence（按句）、plain（硬截断）。
@@ -457,7 +475,6 @@ class UrlSummaryAction(BaseAction):
             pass
 
         if summary_mode == "llm":
-            # 注意：此方法变为同步包装，实际 LLM 摘要走异步流程，见 extract_summary_from_soup
             return "[LLM摘要处理中...]"
 
         if summary_mode == "plain":
@@ -488,12 +505,8 @@ class UrlSummaryAction(BaseAction):
         try:
             from src.plugin_system.apis import llm_api
             logger.info(f"[LLM摘要调用] prompt前100字: {text[:100]}")
-
-            # 获取 ModelConfig 实例
             model_config_obj = llm_api.get_available_models()
             logger.info(f"models获取结果: {model_config_obj}, 类型: {type(model_config_obj)}")
-
-            # === 新增：从配置读取模型名 ===
             model_config_key = self.get_config("processing.llm_config_key", "utils_small")
             model_config = getattr(model_config_obj, model_config_key, None)
             if not model_config:
@@ -502,7 +515,6 @@ class UrlSummaryAction(BaseAction):
             if not model_config:
                 logger.error("未获取到任何可用模型配置，降级本地摘要")
                 return self.summarize_text(text, max_length)
-
             prompt = f"请将以下内容压缩为不超过{max_length}字的中文摘要：\n{text}"
             success, response, reasoning, model_used = await llm_api.generate_with_model(prompt, model_config)
             logger.info(f"[LLM摘要调用] model={model_used}, success={success}, response前100字={response[:100] if response else response}")
@@ -514,6 +526,7 @@ class UrlSummaryAction(BaseAction):
         except Exception as e:
             logger.exception(f"[LLM摘要调用] 失败: {e}")
             return self.summarize_text(text, max_length)       
+
     def extract_summary_from_soup(self, soup: BeautifulSoup, html: str, max_length: int) -> str:
         meta_desc = soup.find("meta", attrs={"name": "description"}) or \
             soup.find("meta", attrs={"property": "og:description"})
@@ -523,7 +536,6 @@ class UrlSummaryAction(BaseAction):
         site = og_site.get("content", "").strip() if og_site else ""
         desc = meta_desc.get("content", "").strip() if meta_desc else ""
         content = self.extract_main_content(soup, html=html)
-        # 新增：支持异步 LLM 智能摘要。标记需要异步处理。
         summary_mode = "sentence"
         try:
             summary_mode = self.get_config("processing.summary_mode", "sentence")
@@ -532,106 +544,14 @@ class UrlSummaryAction(BaseAction):
             pass
         logger.info(f"[摘要流程] summary_mode={summary_mode}, content前50字: {content[:50]}")
         if summary_mode == "llm" and content:
-            # 在 get_url_summary 里判定/触发异步摘要
             summary = "[[LLM摘要处理中]]"
         else:
             summary = desc if desc else self.summarize_text(content, max_length)
-
         lines = []
         if title: lines.append(f"**{title}**")
         if site: lines.append(f"（{site}）")
         lines.append(summary)
         return "\n".join(lines).strip()
-
-    async def get_url_summary(
-        self,
-        url: str,
-        timeout: int,
-        max_length: int,
-        user_agent: str,
-        fetch_links: bool = True,
-        seen_links: Optional[Set[str]] = None,
-        max_subpage: int = 2,
-        subpage_length: int = 200
-    ) -> Optional[str]:
-        if not url.startswith(("http://", "https://")):
-            return f"⚠️ 无效的URL格式: {url}"
-        headers = {"User-Agent": user_agent}
-        if seen_links is None:
-            seen_links = set()
-        for attempt in range(3):
-            try:
-                async with aiohttp.ClientSession() as session:
-                    logger.debug(f"尝试获取URL内容: {url} (尝试 {attempt+1}/3)")
-                    async with session.get(
-                        url,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=timeout),
-                        ssl=False
-                    ) as response:
-                        if response.status != 200:
-                            return f"⚠️ 无法访问网页 (状态码: {response.status})"
-                        raw = await response.read()
-                        encoding = response.charset
-                        if not encoding:
-                            try:
-                                import chardet
-                                encoding = chardet.detect(raw)['encoding']
-                            except Exception:
-                                encoding = 'utf-8'
-                        try:
-                            html = raw.decode(encoding or 'utf-8', errors='ignore')
-                        except Exception:
-                            html = raw.decode('utf-8', errors='ignore')
-                        logger.debug(f"抓取到的HTML片段: {html[:500]}")
-
-                        soup_for_links = BeautifulSoup(html, 'html.parser')
-                        soup = BeautifulSoup(html, 'html.parser')
-                        # 判断是否需要 LLM 智能摘要
-                        summary_mode = self.get_config("processing.summary_mode", "sentence")
-                        content = self.extract_main_content(soup, html=html)
-                        if summary_mode == "llm" and content:
-                            summary = await self.summarize_by_llm(content, max_length)
-                            meta_desc = soup.find("meta", attrs={"name": "description"}) or \
-                                soup.find("meta", attrs={"property": "og:description"})
-                            og_title = soup.find("meta", attrs={"property": "og:title"})
-                            og_site = soup.find("meta", attrs={"property": "og:site_name"})
-                            title = og_title.get("content", "").strip() if og_title else (soup.title.get_text(strip=True) if soup.title else "")
-                            site = og_site.get("content", "").strip() if og_site else ""
-                            desc = meta_desc.get("content", "").strip() if meta_desc else ""
-                            lines = []
-                            if title: lines.append(f"**{title}**")
-                            if site: lines.append(f"（{site}）")
-                            lines.append(summary)
-                            summary = "\n".join(lines).strip()
-                        else:
-                            summary = self.extract_summary_from_soup(soup, html, max_length)
-                        # 相关页面逻辑不变
-                        if fetch_links:
-                            internal_links = self.extract_internal_links(
-                                soup_for_links, url, max_links=max_subpage, seen_links=seen_links
-                            )
-                            if internal_links:
-                                for link in internal_links:
-                                    seen_links.add(link)
-                                related = await self.get_multi_url_summaries(
-                                    internal_links, timeout, subpage_length, user_agent, seen_links=seen_links
-                                )
-                                if related:
-                                    summary += "\n\n相关页面："
-                                    for link, sub_summary in related:
-                                        link_disp = link if len(link) <= 50 else f"{link[:30]}...{link[-20:]}"
-                                        summary += f"\n【{link_disp}】\n{sub_summary}"
-                        return summary
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                logger.warning(f"请求失败 (尝试 {attempt+1}/3): {type(e).__name__}")
-                if attempt == 2:
-                    return f"❌❌ 请求失败: {type(e).__name__}"
-                await asyncio.sleep(1)
-            except Exception as e:
-                logger.exception("处理错误")
-                return f"❌❌ 处理错误: {type(e).__name__}"
-        return "❌❌ 多次尝试后仍无法获取内容"
 
 @register_plugin
 class UrlSummaryPlugin(BasePlugin):
@@ -661,7 +581,8 @@ class UrlSummaryPlugin(BasePlugin):
                     default="Mozilla/5.0 (compatible; MaiBot-URL-Summary/1.0)",
                     description="HTTP请求使用的User-Agent"
                 ),
-                "max_retries": ConfigField(type=int, default=3, description="最大重试次数")
+                "max_retries": ConfigField(type=int, default=3, description="最大重试次数"),
+                "proxy": ConfigField(type=str, default="http://127.0.0.1:7890", description="HTTP请求所用的代理地址，如 http://127.0.0.1:7890")
             },
             "processing": {
                 "max_length": ConfigField(type=int, default=400, description="摘要最大长度"),
@@ -675,7 +596,6 @@ class UrlSummaryPlugin(BasePlugin):
                     default="sentence",
                     description="摘要生成方式，可选 llm（智能摘要）、sentence（按句截断）、plain（原样截断）"
                 ),
-                # === 新增配置项：LLM模型选择 ===
                 "llm_config_key": ConfigField(
                     type=str,
                     default="utils_small",
