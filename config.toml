@@ -29,6 +29,9 @@ user_agent = "Mozilla/5.0 (compatible; MaiBot-URL-Summary/1.0)"
 # 最大重试次数
 max_retries = 3
 
+# HTTP请求所用的代理地址，如 http://127.0.0.1:7890
+proxy = "http://127.0.0.1:7890"
+
 
 # 内容处理设置
 [processing]
