@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "网址摘要插件",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "自动检测消息中的网址并发送内容摘要",
   "author": {
     "name": "晴空",
