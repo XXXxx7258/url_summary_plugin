@@ -21,7 +21,7 @@ try:
 except ImportError:
     readability_available = False
 
-# --------- 去重缓存实现（支持配置） ---------
+# --------- 消息去重缓存实现（支持配置） ---------
 recent_messages = OrderedDict()
 
 def get_cache_ttl():
@@ -54,6 +54,39 @@ def is_duplicate_message(msg):
     if len(recent_messages) > MAX_CACHE:
         recent_messages.popitem(last=False)
     return False
+
+# --------- URL摘要缓存 ---------
+url_summary_cache = OrderedDict()
+URL_CACHE_TTL = 3600  # 1小时
+MAX_URL_CACHE = 500
+
+def get_url_cache_ttl():
+    try:
+        plugin_inst = UrlSummaryPlugin.plugin_instance
+        if plugin_inst:
+            return plugin_inst.get_config("cache.url_cache_ttl", 3600)
+    except Exception:
+        pass
+    return 3600
+
+def get_url_summary_from_cache(url):
+    now = time.time()
+    cache_ttl = get_url_cache_ttl()
+    # 清理过期
+    keys_to_del = [k for k, v in url_summary_cache.items() if now - v['time'] > cache_ttl]
+    for k in keys_to_del:
+        url_summary_cache.pop(k, None)
+    # 命中
+    if url in url_summary_cache:
+        url_summary_cache[url]['time'] = now  # 更新访问时间
+        return url_summary_cache[url]['summary']
+    return None
+
+def set_url_summary_cache(url, summary):
+    now = time.time()
+    url_summary_cache[url] = {'summary': summary, 'time': now}
+    if len(url_summary_cache) > MAX_URL_CACHE:
+        url_summary_cache.popitem(last=False)
 
 class UrlSummaryAction(BaseAction):
     """网址摘要Action - 智能检测并总结网页内容，并对主站内重要链接做二级摘要"""
@@ -121,6 +154,13 @@ class UrlSummaryAction(BaseAction):
             url = urls[0]
             logger.info(f"开始处理URL: {url}")
 
+            # --------- URL级别缓存去重 ---------
+            cached_summary = get_url_summary_from_cache(url)
+            if cached_summary:
+                logger.info(f"URL命中缓存，直接返回摘要: {url}")
+                await self.send_summary(url, cached_summary)
+                return True, f"已发送 {url} 的缓存摘要"
+
             timeout = self.get_config("http.timeout", self.DEFAULT_TIMEOUT)
             max_length = self.get_config("processing.max_length", self.DEFAULT_MAX_LENGTH)
             user_agent = self.get_config(
@@ -141,6 +181,7 @@ class UrlSummaryAction(BaseAction):
                 subpage_length=subpage_length,
             )
             if summary:
+                set_url_summary_cache(url, summary)
                 await self.send_summary(url, summary)
                 return True, f"已发送 {url} 的内容摘要"
             return False, "无法获取网页内容"
@@ -175,9 +216,6 @@ class UrlSummaryAction(BaseAction):
             logger.warning(f"发送成功表情失败: {str(e)}")
 
     def format_summary_message(self, display_url: str, summary: str) -> str:
-        """
-        用 markdown 更美观地展示摘要，主内容和相关页面分开。
-        """
         parts = summary.split('\n\n相关页面：', 1)
         main = parts[0].strip()
         related = parts[1].strip() if len(parts) == 2 else None
@@ -249,7 +287,6 @@ class UrlSummaryAction(BaseAction):
         max_subpage: int = 2,
         subpage_length: int = 200
     ) -> Optional[str]:
-        """最佳实践：支持 HTTP 头、Clash 代理、LLM 智能摘要、抓取相关页面。"""
         if not url.startswith(("http://", "https://")):
             return f"⚠️ 无效的URL格式: {url}"
         headers = {
@@ -289,7 +326,6 @@ class UrlSummaryAction(BaseAction):
 
                         soup_for_links = BeautifulSoup(html, 'html.parser')
                         soup = BeautifulSoup(html, 'html.parser')
-                        # 智能摘要逻辑，可扩展更多 summary_mode
                         summary_mode = self.get_config("processing.summary_mode", "sentence")
                         content = self.extract_main_content(soup, html=html)
                         if summary_mode == "llm" and content:
@@ -344,11 +380,17 @@ class UrlSummaryAction(BaseAction):
         for url in urls:
             if url in seen_links:
                 continue
+            cached_summary = get_url_summary_from_cache(url)
+            if cached_summary:
+                results.append((url, cached_summary))
+                seen_links.add(url)
+                continue
             try:
                 summary = await self.get_url_summary(
                     url, timeout, max_length, user_agent, fetch_links=False, seen_links=seen_links
                 )
                 if summary:
+                    set_url_summary_cache(url, summary)
                     results.append((url, summary))
                 seen_links.add(url)
             except Exception as e:
@@ -383,7 +425,6 @@ class UrlSummaryAction(BaseAction):
         return links
 
     def extract_main_content(self, soup: BeautifulSoup, html: str = None) -> str:
-        # 1. 优先用 readability
         if readability_available and html is not None:
             try:
                 doc = Document(html)
@@ -395,7 +436,6 @@ class UrlSummaryAction(BaseAction):
                     return text
             except Exception as e:
                 logger.warning(f"readability抽取正文失败: {str(e)}")
-        # 2. 常见标签
         for tag in ['article', 'main', 'content', 'entry-content', 'body', 'section']:
             element = soup.find(tag)
             if element:
@@ -403,7 +443,6 @@ class UrlSummaryAction(BaseAction):
                 logger.debug(f"标签<{tag}>正文长度: {len(text)}")
                 if len(text) > 50:
                     return text
-        # 3. 常见 class
         for class_name in [
             'wp_articlecontent', 'article-content', 'articleBody', 'article', 'main', 'content', 'entry-content',
             'body', 'post', 'post-content', 'main-content', 'TRS_Editor',
@@ -415,7 +454,6 @@ class UrlSummaryAction(BaseAction):
                 logger.debug(f"class={class_name} 正文长度: {len(text)}")
                 if len(text) > 50:
                     return text
-        # 4. 放宽<p>长度限制
         paragraphs = []
         for p in soup.find_all('p'):
             text = p.get_text(" ", strip=True)
@@ -424,14 +462,12 @@ class UrlSummaryAction(BaseAction):
         if paragraphs:
             logger.debug(f"抓到段落数: {len(paragraphs)}，合并前3段落为：{' | '.join(paragraphs[:3])}")
             return " ".join(paragraphs[:20])
-        # 5. 整个<body>
         body = soup.body
         if body:
             text = body.get_text(" ", strip=True)
             logger.debug(f"<body>长度: {len(text)}")
             if len(text) > 50:
                 return text
-        # 6. headlines fallback
         a_tags = soup.find_all('a', href=True)
         headlines = []
         for a in a_tags:
@@ -456,10 +492,6 @@ class UrlSummaryAction(BaseAction):
         return None
 
     def summarize_text(self, text: str, max_length: int = 400) -> str:
-        """
-        支持三种摘要模式：llm（调用LLM智能摘要）、sentence（按句）、plain（硬截断）。
-        摘要模式通过 processing.summary_mode 配置（llm/sentence/plain），默认 sentence。
-        """
         import re
         text = re.sub(r'([a-zA-Z0-9])。([a-zA-Z0-9])', r'\1.\2', text)
         text = text.strip()
@@ -487,7 +519,6 @@ class UrlSummaryAction(BaseAction):
                 return text[:trunc_point + 1] + "..."
             return text[:max_length] + "..."
 
-        # 默认 sentence 模式
         sentences = re.split(r'([。！？!?\.])', text)
         result = ''
         total = 0
@@ -593,17 +624,18 @@ class UrlSummaryPlugin(BasePlugin):
                 "enable_related_pages": ConfigField(type=bool, default=True, description="是否抓取站内相关页面摘要"),
                 "summary_mode": ConfigField(
                     type=str,
-                    default="sentence",
+                    default="llm",
                     description="摘要生成方式，可选 llm（智能摘要）、sentence（按句截断）、plain（原样截断）"
                 ),
                 "llm_config_key": ConfigField(
                     type=str,
-                    default="utils_small",
+                    default="replyer_1",
                     description="LLM摘要时采用的模型配置key，例如：utils_small, replyer_1, replyer_2"
                 )
             },
             "cache": {
-                "cache_ttl": ConfigField(type=int, default=600, description="防重复缓存时间(秒)")
+                "cache_ttl": ConfigField(type=int, default=600, description="防重复缓存时间(秒)"),
+                "url_cache_ttl": ConfigField(type=int, default=3600, description="URL摘要缓存时间(秒)")
             }
         }
     plugin_instance = None
