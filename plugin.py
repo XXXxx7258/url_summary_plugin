@@ -4,7 +4,7 @@ import aiohttp
 import asyncio
 import urllib.parse
 from bs4 import BeautifulSoup
-from typing import List, Tuple, Type, Optional, Set
+from typing import List, Tuple, Optional, Set, Type
 from collections import OrderedDict
 import time
 from src.plugin_system import (
@@ -14,6 +14,18 @@ from src.plugin_system import (
 from src.plugin_system.apis import message_api, send_api, config_api, emoji_api
 
 logger = logging.getLogger(__name__)
+
+# --------- 本轮激活URL去重 ---------
+_recently_activated_urls: Set[str] = set()
+
+def should_skip_url_activation(url: str) -> bool:
+    """
+    如果 URL 在本聊天进程中已激活过一次，则跳过后续激活。
+    """
+    if url in _recently_activated_urls:
+        return True
+    _recently_activated_urls.add(url)
+    return False
 
 try:
     from readability import Document
@@ -38,13 +50,13 @@ MAX_CACHE = 500
 def is_duplicate_message(msg):
     now = time.time()
     cache_ttl = get_cache_ttl()
-    key = None
     if hasattr(msg, "id") and msg.id:
         key = f"id:{msg.id}"
     elif hasattr(msg, "plain_text") and msg.plain_text:
         key = f"hash:{hash(msg.plain_text)}"
     else:
         key = f"hash:{hash(str(msg))}"
+    # 清理过期记录
     keys_to_del = [k for k, v in recent_messages.items() if now - v > cache_ttl]
     for k in keys_to_del:
         recent_messages.pop(k, None)
@@ -57,7 +69,6 @@ def is_duplicate_message(msg):
 
 # --------- URL摘要缓存 ---------
 url_summary_cache = OrderedDict()
-URL_CACHE_TTL = 3600  # 1小时
 MAX_URL_CACHE = 500
 
 def get_url_cache_ttl():
@@ -76,9 +87,8 @@ def get_url_summary_from_cache(url):
     keys_to_del = [k for k, v in url_summary_cache.items() if now - v['time'] > cache_ttl]
     for k in keys_to_del:
         url_summary_cache.pop(k, None)
-    # 命中
     if url in url_summary_cache:
-        url_summary_cache[url]['time'] = now  # 更新访问时间
+        url_summary_cache[url]['time'] = now
         return url_summary_cache[url]['summary']
     return None
 
@@ -89,7 +99,7 @@ def set_url_summary_cache(url, summary):
         url_summary_cache.popitem(last=False)
 
 class UrlSummaryAction(BaseAction):
-    """网址摘要Action - 智能检测并总结网页内容，并对主站内重要链接做二级摘要"""
+    """网址摘要Action - 支持关键词和LLM判断，避免重复触发"""
     action_name = "url_summary"
     action_description = "检测消息中的真实网址并发送内容摘要"
     focus_activation_type = ActionActivationType.KEYWORD
@@ -121,64 +131,59 @@ class UrlSummaryAction(BaseAction):
             r'(?:(?:[a-zA-Z0-9\u00a1-\uffff-]{1,63}\.)+'
             r'[a-zA-Z\u00a1-\uffff]{2,})'
             r'(?::\d+)?'
-            r'(?:[/?#][^\s"]*)?'
+            r'(?:[\/?#][^\s"]*)?'
             r'$', re.IGNORECASE
         )
 
     async def execute(self) -> Tuple[bool, str]:
-        if hasattr(self, 'message'):
-            if is_duplicate_message(self.message):
+        try:
+            # 激活前检查：同轮次已处理则跳过
+            urls = []
+            if hasattr(self, 'action_data') and self.action_data.get("url"):
+                urls = [self.normalize_url(self.action_data.get("url"))]
+            elif hasattr(self, 'message') and self.message:
+                urls = self.extract_and_validate_urls(self.message.plain_text)
+            if urls and should_skip_url_activation(urls[0]):
+                logger.info(f"URL 已在本轮激活过，跳过执行: {urls[0]}")
+                return False, "该链接已处理过"
+
+            # 消息层去重
+            if hasattr(self, 'message') and is_duplicate_message(self.message):
                 logger.info("检测到重复消息，跳过处理")
                 return False, "已忽略重复消息"
-        try:
-            logger.debug(f"UrlSummaryAction 收到 action_data: {getattr(self, 'action_data', {})}")
-            logger.debug(f"消息对象存在: {hasattr(self, 'message')}")
+
+            # 提取URL
             urls = []
-            if hasattr(self, 'action_data') and self.action_data:
-                url_param = self.action_data.get("url", "")
-                logger.debug(f"规划器提供的URL参数: {url_param}")
-                if url_param and self.is_valid_url(url_param):
-                    urls = [self.normalize_url(url_param)]
-                else:
-                    urls = self.extract_and_validate_urls(url_param)
-            if not urls and hasattr(self, 'message') and self.message:
-                logger.debug("尝试从消息对象中提取URL")
-                message_text = self.message.plain_text
-                urls = self.extract_and_validate_urls(message_text)
-            if not urls and hasattr(self, 'raw_message') and self.raw_message:
-                logger.debug("尝试从原始消息文本中提取URL")
+            if hasattr(self, 'action_data') and self.action_data.get("url"):
+                urls = [self.normalize_url(self.action_data.get("url"))]
+            elif hasattr(self, 'message') and self.message:
+                urls = self.extract_and_validate_urls(self.message.plain_text)
+            elif hasattr(self, 'raw_message') and self.raw_message:
                 urls = self.extract_and_validate_urls(self.raw_message)
             if not urls:
-                logger.debug("未检测到有效URL，跳过处理")
                 return False, "未检测到有效URL"
             url = urls[0]
-            logger.info(f"开始处理URL: {url}")
 
-            # --------- URL级别缓存去重 ---------
-            cached_summary = get_url_summary_from_cache(url)
-            if cached_summary:
-                logger.info(f"URL命中缓存，直接返回摘要: {url}")
-                await self.send_summary(url, cached_summary)
+            # 检查摘要缓存
+            cached = get_url_summary_from_cache(url)
+            if cached:
+                await self.send_summary(url, cached)
                 return True, f"已发送 {url} 的缓存摘要"
 
+            # 配置
             timeout = self.get_config("http.timeout", self.DEFAULT_TIMEOUT)
             max_length = self.get_config("processing.max_length", self.DEFAULT_MAX_LENGTH)
-            user_agent = self.get_config(
-                "http.user_agent",
-                "Mozilla/5.0 (compatible; MaiBot-URL-Summary/1.0)"
-            )
+            user_agent = self.get_config("http.user_agent", "Mozilla/5.0")
             max_subpage = self.get_config("processing.max_subpage", self.DEFAULT_MAX_SUBPAGE)
             subpage_length = self.get_config("processing.subpage_length", self.DEFAULT_SUBPAGE_LENGTH)
-            enable_related_pages = self.get_config("processing.enable_related_pages", True)
+            enable_related = self.get_config("processing.enable_related_pages", True)
 
             await self.send_processing_feedback()
-            seen_links = set([url])
+            seen = {url}
             summary = await self.get_url_summary(
                 url, timeout, max_length, user_agent,
-                fetch_links=enable_related_pages,
-                seen_links=seen_links,
-                max_subpage=max_subpage,
-                subpage_length=subpage_length,
+                fetch_links=enable_related, seen_links=seen,
+                max_subpage=max_subpage, subpage_length=subpage_length
             )
             if summary:
                 set_url_summary_cache(url, summary)
@@ -259,7 +264,8 @@ class UrlSummaryAction(BaseAction):
             normalized_url = self.normalize_url(url)
             if self.is_valid_url(normalized_url):
                 valid_urls.append(normalized_url)
-        return valid_urls
+        from collections import OrderedDict
+        return list(OrderedDict.fromkeys(valid_urls))
 
     def normalize_url(self, url: str) -> str:
         url = urllib.parse.unquote(url.strip())
@@ -589,7 +595,7 @@ class UrlSummaryPlugin(BasePlugin):
     plugin_name = "url_summary_plugin"
     plugin_description = "自动检测消息中的真实网址并发送内容摘要（包括重要内链）"
     plugin_version = "2.3.3"
-    plugin_author = "Your Name"
+    plugin_author = "qingkong"
     enable_plugin = True
     config_file_name = "config.toml"
     config_section_descriptions = {
@@ -624,12 +630,12 @@ class UrlSummaryPlugin(BasePlugin):
                 "enable_related_pages": ConfigField(type=bool, default=True, description="是否抓取站内相关页面摘要"),
                 "summary_mode": ConfigField(
                     type=str,
-                    default="llm",
+                    default="sentence",
                     description="摘要生成方式，可选 llm（智能摘要）、sentence（按句截断）、plain（原样截断）"
                 ),
                 "llm_config_key": ConfigField(
                     type=str,
-                    default="replyer_1",
+                    default="utils_small",
                     description="LLM摘要时采用的模型配置key，例如：utils_small, replyer_1, replyer_2"
                 )
             },
