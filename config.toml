@@ -24,7 +24,7 @@ enable_private = true
 timeout = 10
 
 # HTTP请求使用的User-Agent
-user_agent = "Mozilla/5.0 (compatible; MaiBot-URL-Summary/1.0)"
+user_agent = "Mozilla/5.0 (compatible; MaiBot-URL-Summary/2.0)"
 
 # 最大重试次数
 max_retries = 3
@@ -32,12 +32,18 @@ max_retries = 3
 # HTTP请求所用的代理地址，如 http://127.0.0.1:7890
 proxy = "http://127.0.0.1:7890"
 
+# 最大重定向次数
+max_redirects = 5
+
+# 最大响应大小(字节)，默认10MB
+max_response_size = 10485760
+
 
 # 内容处理设置
 [processing]
 
 # 摘要最大长度
-max_length = 400
+max_length = 600
 
 # 是否包含标题
 include_title = true
@@ -46,7 +52,7 @@ include_title = true
 min_content_length = 100
 
 # 相关页面最多抓取数量
-max_subpage = 2
+max_subpage = 3
 
 # 相关页面摘要最大长度
 subpage_length = 200
@@ -66,5 +72,36 @@ llm_config_key = "replyer_1"
 
 # 防重复缓存时间(秒)
 cache_ttl = 600
+
+# URL摘要缓存时间(秒)
+url_cache_ttl = 3600
+
+
+# 安全设置
+[security]
+
+# 是否启用安全检查
+enable_security_check = true
+
+# 是否允许访问内网IP
+allow_private_ip = false
+
+# 禁止访问的主机列表
+blocked_hosts = ['localhost', '127.0.0.1', '0.0.0.0', '::1', '169.254.169.254']
+
+# 禁止访问的端口列表
+blocked_ports = [22, 23, 135, 139, 445, 3389]
+
+# 允许的URL协议
+allowed_schemes = ['http', 'https']
+
+# 最大URL长度
+max_url_length = 2048
+
+# 是否进行DNS解析检查
+enable_dns_check = true
+
+# DNS解析超时时间(秒)
+dns_timeout = 5
 
 
