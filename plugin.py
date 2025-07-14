@@ -857,6 +857,8 @@ class UrlSummaryPlugin(BasePlugin):
     plugin_description = "自动检测消息中的真实网址并发送内容摘要（包括重要内链）- 增强安全版本"
     plugin_version = "2.4.0"  # 更新版本号
     plugin_author = "qingkong"
+    dependencies = []
+    python_dependencies = []
     enable_plugin = True
     config_file_name = "config.toml"
     config_section_descriptions = {
@@ -936,6 +938,9 @@ class UrlSummaryPlugin(BasePlugin):
         UrlSummaryPlugin.plugin_instance = self
         super().__init__(*args, **kwargs)
         logger.info("URL摘要插件已加载 - 安全增强版本")
+
+    def get_help(self):
+        return "用法: /url_summary <网址>\n功能: 获取网页内容摘要。"
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
         if not self.get_config("general.enabled", True):
