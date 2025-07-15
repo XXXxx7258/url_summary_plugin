@@ -382,10 +382,10 @@ class UrlSummaryAction(BaseAction):
                     continue
                 if sub.startswith("http"):
                     continue
-                msg += f"> {sub.strip().replace(chr(10), '\\n> ')}\n"
+                sub_str = sub.strip().replace(chr(10), '\n> ')
+                msg += f"> {sub_str}\n"
             msg += "</details>"
         return msg
-
     async def send_timeout_message(self):
         try:
             await self.send_text("⏱⏱⏱ 网页加载超时，请稍后再试")
