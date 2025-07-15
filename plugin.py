@@ -374,7 +374,8 @@ class UrlSummaryAction(BaseAction):
         parts = summary.split('\n\n相关页面：', 1)
         main = parts[0].strip()
         related = parts[1].strip() if len(parts) == 2 else None
-        msg = f"🔗 **网页摘要** [`{display_url}`]\n\n> {main.replace(chr(10), '\n> ')}"
+        main_str = main.replace(chr(10), '\n> ')
+        msg = f"🔗 **网页摘要** [`{display_url}`]\n\n> {main_str}"
         if related:
             msg += "\n\n<details><summary>相关页面</summary>\n\n"
             for sub in re.split(r"\n【(https?://[^】]+)】\n", "\n"+related):
@@ -386,6 +387,7 @@ class UrlSummaryAction(BaseAction):
                 msg += f"> {sub_str}\n"
             msg += "</details>"
         return msg
+
     async def send_timeout_message(self):
         try:
             await self.send_text("⏱⏱⏱ 网页加载超时，请稍后再试")
