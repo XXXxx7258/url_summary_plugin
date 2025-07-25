@@ -374,8 +374,7 @@ class UrlSummaryAction(BaseAction):
         parts = summary.split('\n\n相关页面：', 1)
         main = parts[0].strip()
         related = parts[1].strip() if len(parts) == 2 else None
-        main_str = main.replace(chr(10), '\n> ')
-        msg = f"🔗 **网页摘要** [`{display_url}`]\n\n> {main_str}"
+        msg = f"🔗 **网页摘要** [`{display_url}`]\n\n> {main.replace(chr(10), '\n> ')}"
         if related:
             msg += "\n\n<details><summary>相关页面</summary>\n\n"
             for sub in re.split(r"\n【(https?://[^】]+)】\n", "\n"+related):
@@ -383,8 +382,7 @@ class UrlSummaryAction(BaseAction):
                     continue
                 if sub.startswith("http"):
                     continue
-                sub_str = sub.strip().replace(chr(10), '\n> ')
-                msg += f"> {sub_str}\n"
+                msg += f"> {sub.strip().replace(chr(10), '\\n> ')}\n"
             msg += "</details>"
         return msg
 
@@ -808,10 +806,10 @@ class UrlSummaryAction(BaseAction):
             model_config_obj = llm_api.get_available_models()
             logger.info(f"models获取结果: {model_config_obj}, 类型: {type(model_config_obj)}")
             model_config_key = self.get_config("processing.llm_config_key", "utils_small")
-            model_config = getattr(model_config_obj, model_config_key, None)
+            model_config = model_config_obj.get(model_config_key)
             if not model_config:
                 logger.warning(f"未找到指定模型 {model_config_key}，尝试 fallback")
-                model_config = getattr(model_config_obj, "replyer_1", None)
+                model_config = model_config_obj.get("replyer_1")
             if not model_config:
                 logger.error("未获取到任何可用模型配置，降级本地摘要")
                 return self.summarize_text(text, max_length)
@@ -825,7 +823,7 @@ class UrlSummaryAction(BaseAction):
                 return self.summarize_text(text, max_length)
         except Exception as e:
             logger.exception(f"[LLM摘要调用] 失败: {e}")
-            return self.summarize_text(text, max_length)       
+            return self.summarize_text(text, max_length)
 
     def extract_summary_from_soup(self, soup: BeautifulSoup, html: str, max_length: int) -> str:
         meta_desc = soup.find("meta", attrs={"name": "description"}) or \
